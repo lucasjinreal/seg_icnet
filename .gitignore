@@ -1,2 +1,4 @@
 snapshots/
 snapshot/
+.idea/
+__pycache__/
