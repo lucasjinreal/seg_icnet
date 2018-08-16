@@ -1,7 +1,17 @@
 from network import Network
 import tensorflow as tf
+from tools import load_img, preprocess
+
 
 class ICNet(Network):
+    def __init__(self, is_training=False, num_classes=19, input_size=[1024, 2048]):
+        self.input_size = input_size
+
+        self.x = tf.placeholder(dtype=tf.float32, shape=[None, None, 3])
+        self.img_tf, self.shape = preprocess(self.x, self.input_size, 'icnet')
+
+        super().__init__({'data': self.img_tf}, num_classes, is_training)
+
     def setup(self, is_training, num_classes, evalutaion):
         (self.feed('data')
              .interp(s_factor=0.5, name='data_sub2')
@@ -238,6 +248,16 @@ class ICNet(Network):
              .relu(name='sub12_sum/relu')
              .interp(z_factor=2.0, name='sub12_sum_interp')
              .conv(1, 1, num_classes, 1, 1, biased=True, relu=False, name='conv6_cls'))
+
+    def read_input(self, img_path):
+        self.img, self.img_name = load_img(img_path)
+
+    def read_image(self, img):
+        self.img = img
+
+    def forward(self, sess):
+        return sess.run(self.pred, feed_dict={self.x: self.img})
+
 
 class ICNet_BN(Network):
     def setup(self, is_training, num_classes, evaluation):

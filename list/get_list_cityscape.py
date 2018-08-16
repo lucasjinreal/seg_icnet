@@ -11,4 +11,5 @@ def get_pair(img_dir, label_dir):
         all_labels = [i for i in os.listdir(label_dir) if i.endswith('png') or i.endswith('jpg') or i.endswith('jpeg')]
 
         # find the pair
+        # leftImg8bit/train/cologne/cologne_000000_000019_leftImg8bit.png gtFine/train/cologne/cologne_000000_000019_gtFine_labelIds.png
         pass
