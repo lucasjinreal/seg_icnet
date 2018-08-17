@@ -15,6 +15,8 @@ Then using:
 python3 train.py --update-mean-var --train-beta-gamma
 ```
 
+**NOTE**: `--update-mean-var` and `--train-beta-gamma` must be done, if not result get very bad.
+
 # Dataset Preperation
 
 Using Ciryscape like training data, provide the cityscape dataset dir and train_list.list in this format:
@@ -22,3 +24,7 @@ Using Ciryscape like training data, provide the cityscape dataset dir and train_
 ```
 leftImg8bit/train/bremen/bremen_000315_000019_leftImg8bit.png gtFine/train/bremen/bremen_000315_000019_gtFine_labelIds.png
 ```
+
+# Copyright
+
+this codes original from [here](https://github.com/hellochick/ICNet-tensorflow), thanks for `HelloChik` work.
