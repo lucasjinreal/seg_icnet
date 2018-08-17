@@ -1,75 +1,98 @@
-"""
-Do segmentation
-"""
 from __future__ import print_function
 
 import argparse
 import os
+import glob
 import sys
-import time
-from PIL import Image
+import timeit
+from tqdm import trange
 import tensorflow as tf
 import numpy as np
 from scipy import misc
+
+from model import ICNet, ICNet_BN
+from tools import decode_labels
+import time
 import cv2
 
-from model import ICNet
-import time
+
+IMG_MEAN = np.array((103.939, 116.779, 123.68), dtype=np.float32)
+# define setting & model configuration
+ADE20k_class = 150  # predict: [0~149] corresponding to label [1~150], ignore class 0 (background)
+cityscapes_class = 19
+
+model_paths = {'train': './model/icnet_cityscapes_train_30k.npy',
+               'trainval': './model/icnet_cityscapes_trainval_90k.npy',
+               'train_bn': './model/icnet_cityscapes_train_30k_bnnomerge.npy',
+               'trainval_bn': './model/icnet_cityscapes_trainval_90k_bnnomerge.npy',
+               'others': './model/'}
+
+# mapping different model
+model_config = {'train': ICNet, 'trainval': ICNet, 'train_bn': ICNet_BN, 'trainval_bn': ICNet_BN, 'others': ICNet_BN}
+
+snapshot_dir = './snapshots'
+SAVE_DIR = './output/'
 
 
 class Segment(object):
 
-    def __init__(self, model_name, model_path):
+    def __init__(self, model_name, model_path, num_classes, input_shape):
         self.model_name = model_name
         self.model_path = model_path
+        self.num_classes = num_classes
+
+        self.filter_scale = 1
+        self.shape = input_shape
 
         self.model = None
 
+    def _load_model(self, shape):
+        self.x = tf.placeholder(dtype=tf.float32, shape=shape)
+        img_tf = self.preprocess(self.x)
+        self.img_tf, self.n_shape = self.check_input(img_tf)
+
+        self.model = model_config[self.model_name]
+        print(self.model)
+        net = self.model({'data': img_tf}, num_classes=self.num_classes,
+                         filter_scale=self.filter_scale)
+        # net = self.model({'data': img_tf}, num_classes=self.num_classes)
+
+        raw_output = net.layers['conv6_cls']
+
+        # Predictions.
+        raw_output_up = tf.image.resize_bilinear(raw_output, size=self.n_shape, align_corners=True)
+        raw_output_up = tf.image.crop_to_bounding_box(raw_output_up, 0, 0, shape[0], shape[1])
+        raw_output_up = tf.argmax(raw_output_up, axis=3)
+        self.pred = decode_labels(raw_output_up, shape, self.num_classes)
+
+        # Init tf Session
         config = tf.ConfigProto()
         config.gpu_options.allow_growth = True
         self.sess = tf.Session(config=config)
-        self._load_model()
+        init = tf.global_variables_initializer()
+        self.sess.run(init)
 
-    def _load_model(self):
-
-        if self.model_name == 'icnet':
-            self.model = ICNet()
-            init = tf.global_variables_initializer()
-            self.sess.run(init)
-            self.model.load(self.model_path, self.sess)
-            print('Model initialed.')
+        # model_path = model_paths[self.model_name]
+        model_path = snapshot_dir
+        if self.model_name == 'others':
+            ckpt = tf.train.get_checkpoint_state(model_path)
+            if ckpt and ckpt.model_checkpoint_path:
+                loader = tf.train.Saver(var_list=tf.global_variables())
+                load_step = int(os.path.basename(ckpt.model_checkpoint_path).split('-')[1])
+                self.load(loader, self.sess, ckpt.model_checkpoint_path)
+            else:
+                print('No checkpoint file found.')
         else:
-            print('Only ICNet supported.')
-
-    def seg_img_f(self, img_f, save_dir, is_show=False):
-        tic = time.time()
-        self.model.read_input(img_f)
-        preds = self.model.forward(self.sess)
-
-        original_img = cv2.imread(img_f)
-        original_img = np.array(original_img, dtype='float32')
-        mask_color = np.array(preds[0], dtype='float32')
-
-        overlayed_img = cv2.addWeighted(original_img, 0.4, mask_color, 0.6, 0)
-
-        target_f = os.path.join(save_dir,
-                                '{}_seg.png'.format(os.path.basename(img_f).split('.')[0]))
-        cv2.imwrite(target_f, overlayed_img)
-
-        # print('saved into {}'.format(target_f))
-        print('fps: ', round(1/(time.time() - tic), 3))
-        if is_show:
-            cv2.imshow('o', overlayed_img)
-            cv2.waitKey(0)
+            # model path must be a model
+            net.load(self.model_path, self.sess)
+            print('Restore from {}'.format(model_path))
 
     def seg_img(self, img):
-        # img should read with opencv in RGB format
-        self.model.read_image(img)
-        preds = self.model.forward(self.sess)
-        original_img = np.array(img, dtype='float32')
-        mask_color = np.array(preds[0], dtype='float32')
-
-        overlayed_img = cv2.addWeighted(original_img, 0.4, mask_color, 0.6, 0)
+        tic = time.time()
+        preds = self.sess.run(self.pred, feed_dict={self.x: img})
+        print(preds)
+        print('fps: ', round(1 / (time.time() - tic), 4))
+        overlayed_img = cv2.addWeighted(np.array(img, dtype='float32'), 0.4, preds[0], 0.6, 0)
         return overlayed_img, preds
 
     def seg_video(self, video_f, is_save=True, is_record=False):
@@ -83,6 +106,10 @@ class Segment(object):
                 ret, frame = cap.read()
                 tic = time.time()
                 if ret:
+                    if i == 0:
+                        # get the shape from first frame
+                        print('Detect input shape once: ', frame.shape)
+                        self._load_model(shape=frame.shape)
                     i += 1
                     res, _ = self.seg_img(frame)
 
@@ -99,20 +126,49 @@ class Segment(object):
         else:
             print('# video file not exist: '.format(video_f))
 
-    def seg_dir(self, img_dir):
-        all_images = [os.path.join(img_dir, i) for i in os.listdir(img_dir) if i.endswith('jpg') or i.endswith('png')
-                      or i.endswith('jpeg')]
+    @staticmethod
+    def load(saver, sess, ckpt_path):
+        saver.restore(sess, ckpt_path)
+        print("Restored model parameters from {}".format(ckpt_path))
 
-        save_dir = 'results'
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-        for img in all_images:
+    @staticmethod
+    def load_img(img_path):
+        if os.path.isfile(img_path):
+            print('successful load img: {0}'.format(img_path))
+        else:
+            print('not found file: {0}'.format(img_path))
+            sys.exit(0)
 
-            self.seg_img_f(img, save_dir)
+        filename = img_path.split('/')[-1]
+        img = misc.imread(img_path, mode='RGB')
+        print('input image shape: ', img.shape)
+        return img, filename
+
+    @staticmethod
+    def preprocess(img):
+        # Convert RGB to BGR
+        img_r, img_g, img_b = tf.split(axis=2, num_or_size_splits=3, value=img)
+        img = tf.cast(tf.concat(axis=2, values=[img_b, img_g, img_r]), dtype=tf.float32)
+        # Extract mean.
+        img -= IMG_MEAN
+        img = tf.expand_dims(img, dim=0)
+        return img
+
+    @staticmethod
+    def check_input(img):
+        ori_h, ori_w = img.get_shape().as_list()[1:3]
+        if ori_h % 32 != 0 or ori_w % 32 != 0:
+            new_h = (int(ori_h / 32) + 1) * 32
+            new_w = (int(ori_w / 32) + 1) * 32
+            shape = [new_h, new_w]
+            img = tf.image.pad_to_bounding_box(img, 0, 0, new_h, new_w)
+            print('Image shape cannot divided by 32, padding to ({0}, {1})'.format(new_h, new_w))
+        else:
+            shape = [ori_h, ori_w]
+
+        return img, shape
 
 
 if __name__ == '__main__':
-    seg = Segment('icnet', 'model/cityscapes/icnet.npy')
-    # seg.seg_img_f('input/cityscape.png')
-    # seg.seg_dir('/media/jintian/sg/permanent/Cityscape/leftImg8bit/demoVideo/stuttgart_00')
+    seg = Segment('others', 'model/cityscapes/icnet.npy', cityscapes_class, [1024, 2048])
     seg.seg_video('/media/jintian/sg/permanent/Cityscape/test.mp4')
